@@ -1,51 +1,55 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 import { useGame } from '../game/store'
+import { forward, toRad } from '../game/combat'
 
-const _pos = new THREE.Vector3()
-const _look = new THREE.Vector3()
-const _fwd = new THREE.Vector3()
+const pos = new THREE.Vector3()
+const look = new THREE.Vector3()
+const cur = new THREE.Vector3()
 
-// Smoothly blends between Tactical (top-down) and Combat (over-the-shoulder).
+// Phase-driven camera: top-down tactical <-> over-the-shoulder combat <-> projectile chase.
 export default function CameraRig() {
   const camera = useThree((s) => s.camera)
-  const lookAt = useMemo(() => new THREE.Vector3(0, 0, 0), [])
 
   useEffect(() => {
-    camera.position.set(0, 70, 40)
-    const onKey = (e) => {
-      if (e.key === 'c' || e.key === 'C') useGame.getState().toggleCameraMode()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    camera.position.set(0, 70, 70)
+    cur.set(0, 0, 25)
   }, [camera])
 
-  useFrame((_, dt) => {
-    const { ships, selectedId, cameraMode } = useGame.getState()
+  useFrame((_, dtRaw) => {
+    const dt = Math.min(dtRaw, 0.05)
+    const { ships, selectedId, phase, aim, projectiles, impact } = useGame.getState()
     const ship = ships.find((s) => s.id === selectedId)
-    if (!ship) return
-    const k = 1 - Math.exp(-3 * dt) // frame-rate independent smoothing
+    let rate = 3
 
-    if (cameraMode === 'tactical') {
-      // High angle, slightly tilted so the horizon stays out of frame.
-      _pos.set(ship.position[0], 62, ship.position[2] + 26)
-      _look.set(ship.position[0], 0, ship.position[2] - 4)
+    if (phase === 'PROJECTILE_CAM') {
+      const p = projectiles[0]
+      rate = 7
+      if (p && !p.done) {
+        // Chase from behind and slightly above the round.
+        const h = p.kind === 'torpedo' ? 2.5 : 3
+        pos.set(p.pos[0] - p.dir[0] * 9, Math.max(p.pos[1], 0) + h, p.pos[2] - p.dir[1] * 9)
+        look.set(p.pos[0] + p.dir[0] * 3, p.pos[1], p.pos[2] + p.dir[1] * 3)
+      } else if (impact) {
+        pos.copy(camera.position)
+        look.set(...impact.pos)
+      }
+    } else if (phase === 'COMBAT_PHASE' && ship) {
+      const [fx, fz] = forward(aim.bearing)
+      pos.set(ship.position[0] - fx * ship.length * 1.5, ship.length * 0.9 + 3, ship.position[2] - fz * ship.length * 1.5)
+      // Pitch the view with gun elevation so the crosshair tracks the barrels.
+      look.set(ship.position[0] + fx * 60, 1 + Math.sin(toRad(aim.elevation)) * 12, ship.position[2] + fz * 60)
     } else {
-      // Behind the guns, looking toward the nearest enemy.
-      const me = new THREE.Vector3(...ship.position)
-      const foe = ships
-        .filter((s) => s.team !== ship.team)
-        .map((s) => new THREE.Vector3(...s.position))
-        .sort((a, b) => a.distanceTo(me) - b.distanceTo(me))[0]
-      _fwd.copy(foe ?? new THREE.Vector3(0, 0, -1)).sub(me).setY(0).normalize()
-      _pos.copy(me).addScaledVector(_fwd, -(ship.length * 1.5)).setY(ship.length * 0.9 + 3)
-      _look.copy(me).addScaledVector(_fwd, 60).setY(1)
+      const c = ship ?? { position: [0, 0, 0] }
+      pos.set(c.position[0], 62, c.position[2] + 26)
+      look.set(c.position[0], 0, c.position[2] - 4)
     }
 
-    camera.position.lerp(_pos, k)
-    lookAt.lerp(_look, k)
-    camera.lookAt(lookAt)
+    const k = 1 - Math.exp(-rate * dt)
+    camera.position.lerp(pos, k)
+    cur.lerp(look, k)
+    camera.lookAt(cur)
   })
 
   return null
